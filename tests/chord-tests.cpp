@@ -69,8 +69,8 @@ void chord_examples()
 		std::pair{notes({60, 64, 67, 70, 74, 81}), "C13"},
 		std::pair{notes({60, 64, 67, 70, 73}), "C7b9"},
 		std::pair{notes({60, 64, 67, 70, 75}), "C7#9"},
-		std::pair{notes({60, 64, 70}), "C7(no5)"},
-		std::pair{notes({60, 64, 71, 74}), "Cmaj9(no5)"},
+		std::pair{notes({60, 64, 70}), "C7"},
+		std::pair{notes({60, 64, 71, 74}), "Cmaj9"},
 	};
 	for (const auto &[input, expected] : examples)
 		require(best(input) == expected, std::string("Expected ") + expected + ", got " + best(input));
@@ -134,6 +134,93 @@ void ambiguity_and_conservative_matching()
 	const auto rootless = detect_chords(notes({64, 67, 70}));
 	require(std::none_of(rootless.begin(), rootless.end(), [](const auto &chord) { return chord.root == 0; }),
 		"Do not infer an absent root");
+}
+
+std::string styled(std::initializer_list<int> pitches, ChordStyle style,
+		   ChordAccidentals accidentals = ChordAccidentals::Auto, bool symbols = false)
+{
+	const auto input = notes(pitches);
+	const auto result = detect_chords(input);
+	if (result.empty())
+		return "";
+	ChordFormat format;
+	format.style = style;
+	format.accidentals = accidentals;
+	format.symbols = symbols;
+	return format_chord(result.front(), format);
+}
+
+void extended_vocabulary()
+{
+	struct Case {
+		std::initializer_list<int> pitches;
+		const char *international;
+		const char *brazilian;
+		const char *jazz;
+	};
+	const std::array cases = {
+		Case{{48, 55, 60}, "C5", "C5", "C5"},
+		Case{{60, 64, 65, 67}, "Cadd11", "C(11)", "Cadd11"},
+		Case{{60, 64, 66, 67}, "C(#11)", "C(#11)", "C(#11)"},
+		Case{{60, 64, 66}, "C(b5)", "C(b5)", "C(b5)"},
+		Case{{60, 63, 66}, "Cdim", "Cdim", "C°"},
+		Case{{60, 63, 66, 69}, "Cdim7", "C°", "C°7"},
+		Case{{60, 63, 66, 70}, "Cm7b5", "Cm7(b5)", "Cø7"},
+		Case{{60, 63, 67, 71}, "CmMaj7", "Cm(7M)", "C-Δ7"},
+		Case{{60, 64, 68}, "Caug", "C(#5)", "C+"},
+		Case{{60, 64, 67, 71}, "Cmaj7", "C7M", "CΔ7"},
+		Case{{60, 64, 67, 70, 74}, "C9", "C7(9)", "C9"},
+		Case{{48, 64, 70, 81}, "C13", "C7(13)", "C13"},
+		Case{{48, 64, 70, 74, 81}, "C13", "C7(9/13)", "C13"},
+		Case{{48, 64, 70, 73}, "C7b9", "C7(b9)", "C7b9"},
+		Case{{48, 64, 70, 75}, "C7#9", "C7(#9)", "C7#9"},
+		Case{{48, 64, 67, 70, 80}, "C7b13", "C7(b13)", "C7b13"},
+		Case{{48, 64, 70, 73, 81}, "C13b9", "C7(b9/13)", "C13b9"},
+		Case{{48, 64, 70, 74, 78}, "C9#11", "C7(9/#11)", "C9#11"},
+		Case{{48, 64, 70, 74, 78, 81}, "C13#11", "C7(9/#11/13)", "C13#11"},
+		Case{{48, 64, 71, 74, 78, 81}, "Cmaj13#11", "C7M(9/#11/13)", "CΔ13#11"},
+		Case{{60, 64, 66, 67, 71}, "Cmaj7#11", "C7M(#11)", "CΔ7#11"},
+		Case{{48, 64, 70, 73, 75, 80}, "C7#5b9#9", "C7(#5/b9/#9)", "C7#5b9#9"},
+		Case{{60, 63, 67, 70, 74}, "Cm9", "Cm7(9)", "C-9"},
+		Case{{48, 63, 70, 77}, "Cm11", "Cm7(11)", "C-11"},
+		Case{{60, 63, 67, 69, 74}, "Cm6/9", "Cm6(9)", "C-6/9"},
+		Case{{60, 64, 67, 69, 74}, "C6/9", "C6(9)", "C6/9"},
+		Case{{60, 65, 67, 70}, "C7sus4", "C7(4)", "C7sus4"},
+		Case{{48, 58, 62, 65, 67}, "C9sus4", "C7(4/9)", "C9sus4"},
+		Case{{48, 58, 62, 65, 69}, "C13sus4", "C7(4/9/13)", "C13sus4"},
+		Case{{60, 62, 65, 67}, "Csus4add9", "Csus4(9)", "Csus4add9"},
+		Case{{60, 64, 67, 74}, "Cadd9", "C(9)", "Cadd9"},
+		Case{{60, 63, 67, 74}, "Cmadd9", "Cm(9)", "C-add9"},
+		Case{{60, 65, 70}, "C7sus4", "C7(4)", "C7sus4"},
+		Case{{48, 62, 66, 69}, "D7/C", "D7/C", "D7/C"},
+		Case{{43, 65, 69, 72}, "G9sus4", "G7(4/9)", "G9sus4"},
+		Case{{41, 56, 59, 64}, "E/F", "E/F", "E/F"},
+		Case{{41, 55, 59, 62, 68}, "G7b9/F", "G7(b9)/F", "G7b9/F"},
+		Case{{40, 53, 57, 60}, "Fmaj7/E", "F7M/E", "FΔ7/E"},
+		Case{{64, 67, 70, 74}, "Em7b5", "Em7(b5)", "Eø7"},
+	};
+	for (const auto &c : cases) {
+		const std::string intl = styled(c.pitches, ChordStyle::International);
+		const std::string br = styled(c.pitches, ChordStyle::Brazilian);
+		const std::string jazz = styled(c.pitches, ChordStyle::Jazz);
+		require(intl == c.international,
+			std::string("International: expected ") + c.international + ", got " + intl);
+		require(br == c.brazilian, std::string("Brazilian: expected ") + c.brazilian + ", got " + br);
+		require(jazz == c.jazz, std::string("Jazz: expected ") + c.jazz + ", got " + jazz);
+	}
+	require(detect_chords(notes({60, 64})).empty(), "A third alone is not a chord");
+	require(styled({58, 62, 65, 68}, ChordStyle::International) == "Bb7", "Auto spelling prefers Bb");
+	require(styled({61, 64, 68}, ChordStyle::International) == "C#m", "Auto spelling prefers C#m");
+	require(styled({56, 60, 63}, ChordStyle::International) == "Ab", "Auto spelling prefers Ab");
+	require(styled({54, 58, 61}, ChordStyle::International) == "F#", "Auto spelling prefers F#");
+	require(styled({64, 68, 71, 76}, ChordStyle::International) == "E", "Natural roots stay natural");
+	require(styled({56, 64, 71}, ChordStyle::International) == "E/G#", "Sharp-side bass spelling");
+	require(styled({55, 60, 63}, ChordStyle::International) == "Cm/G", "Minor inversion");
+	require(styled({58, 62, 65, 68}, ChordStyle::Jazz, ChordAccidentals::Auto, true) == "B♭7", "Flat symbol");
+	require(styled({48, 64, 70, 75}, ChordStyle::International, ChordAccidentals::Auto, true) == "C7♯9",
+		"Sharp symbol");
+	require(styled({60, 64, 67}, ChordStyle::International, ChordAccidentals::Auto, true) == "C",
+		"Symbols leave plain names untouched");
 }
 
 void midi_channels_and_validation()
@@ -297,8 +384,9 @@ void exhaustive_pitch_sets()
 
 int main()
 {
-	const std::array<std::pair<const char *, std::function<void()>>, 9> tests = {{
+	const std::array<std::pair<const char *, std::function<void()>>, 10> tests = {{
 		{"chord examples and formatting", chord_examples},
+		{"extended vocabulary and styles", extended_vocabulary},
 		{"all roots and inversions", transpositions_and_inversions},
 		{"ambiguity and conservative matching", ambiguity_and_conservative_matching},
 		{"MIDI channels and validation", midi_channels_and_validation},

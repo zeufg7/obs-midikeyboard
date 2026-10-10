@@ -27,7 +27,7 @@ struct ChordSourceData {
 	int alignment = 1;
 	bool include_sustain = false;
 	bool show_bass = true;
-	bool prefer_flats = false;
+	ChordFormat format;
 	bool preview = false;
 	bool outline = true;
 	bool was_connected = false;
@@ -38,6 +38,18 @@ struct ChordSourceData {
 	uint32_t pending_width = 0;
 	uint32_t pending_height = 0;
 	std::atomic<int> requested_density{2};
+
+	std::string label(const ChordCandidate &chord) const { return format_chord(chord, format); }
+	std::string preview_label() const
+	{
+		// Cmaj7 over E, rendered in the selected style.
+		const std::vector<MidiNote> sample = {{52, 100, 0, true, 0},
+						      {60, 100, 0, true, 0},
+						      {67, 100, 0, true, 0},
+						      {71, 100, 0, true, 0}};
+		const auto chords = detect_chords(sample);
+		return chords.empty() ? std::string("Cmaj7/E") : label(chords.front());
+	}
 
 	~ChordSourceData()
 	{
@@ -146,7 +158,17 @@ void chord_source_update(void *data, obs_data_t *settings)
 	cs->channel = channel;
 	cs->include_sustain = include_sustain;
 	cs->show_bass = obs_data_get_bool(settings, "show_bass");
-	cs->prefer_flats = obs_data_get_bool(settings, "prefer_flats");
+	// Older versions only had a "prefer flats" toggle.
+	if (!obs_data_has_user_value(settings, "accidentals") && obs_data_has_user_value(settings, "prefer_flats"))
+		obs_data_set_int(settings, "accidentals",
+				 obs_data_get_bool(settings, "prefer_flats")
+					 ? static_cast<int>(ChordAccidentals::Flats)
+					 : static_cast<int>(ChordAccidentals::Sharps));
+	cs->format.show_bass = cs->show_bass;
+	cs->format.style = static_cast<ChordStyle>(std::clamp(obs_data_get_int(settings, "chord_style"), 0LL, 2LL));
+	cs->format.accidentals =
+		static_cast<ChordAccidentals>(std::clamp(obs_data_get_int(settings, "accidentals"), 0LL, 2LL));
+	cs->format.symbols = obs_data_get_bool(settings, "chord_symbols");
 	cs->preview = obs_data_get_bool(settings, "preview_chord");
 	cs->outline = obs_data_get_bool(settings, "text_outline");
 	const auto settle = static_cast<uint64_t>(std::clamp(obs_data_get_int(settings, "settle_ms"), 0LL, 500LL));
@@ -161,9 +183,7 @@ void chord_source_update(void *data, obs_data_t *settings)
 		cs->was_connected = false;
 	}
 	const auto &current = cs->tracker.current();
-	const auto label = cs->preview ? std::string("Cmaj7/E")
-			   : current   ? format_chord(*current, cs->show_bass, cs->prefer_flats)
-				       : std::string();
+	const auto label = cs->preview ? cs->preview_label() : current ? cs->label(*current) : std::string();
 	auto *selected = obs_data_get_obj(settings, "chord_font");
 	const auto size = selected ? obs_data_get_int(selected, "size") : 64;
 	cs->font_size = static_cast<int>(std::clamp(size > 0 ? size : 64, 8LL, 256LL));
@@ -239,6 +259,9 @@ void chord_source_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "include_sustain", false);
 	obs_data_set_default_bool(settings, "show_bass", true);
 	obs_data_set_default_bool(settings, "prefer_flats", false);
+	obs_data_set_default_int(settings, "chord_style", static_cast<int>(ChordStyle::International));
+	obs_data_set_default_int(settings, "accidentals", static_cast<int>(ChordAccidentals::Auto));
+	obs_data_set_default_bool(settings, "chord_symbols", false);
 	obs_data_set_default_int(settings, "settle_ms", 70);
 	obs_data_set_default_int(settings, "clear_ms", 180);
 	obs_data_set_default_int(settings, "text_width", 640);
@@ -301,7 +324,22 @@ obs_properties_t *chord_source_properties(void *data)
 
 	auto *recognition = obs_properties_create();
 	obs_properties_add_bool(recognition, "show_bass", obs_module_text("Chord.ShowBass"));
-	obs_properties_add_bool(recognition, "prefer_flats", obs_module_text("Chord.PreferFlats"));
+	auto *style = obs_properties_add_list(recognition, "chord_style", obs_module_text("Chord.Style"),
+					      OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(style, obs_module_text("Chord.Style.International"),
+				  static_cast<int>(ChordStyle::International));
+	obs_property_list_add_int(style, obs_module_text("Chord.Style.Brazilian"),
+				  static_cast<int>(ChordStyle::Brazilian));
+	obs_property_list_add_int(style, obs_module_text("Chord.Style.Jazz"), static_cast<int>(ChordStyle::Jazz));
+	auto *accidentals = obs_properties_add_list(recognition, "accidentals", obs_module_text("Chord.Accidentals"),
+						    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(accidentals, obs_module_text("Chord.Accidentals.Auto"),
+				  static_cast<int>(ChordAccidentals::Auto));
+	obs_property_list_add_int(accidentals, obs_module_text("Chord.Accidentals.Sharps"),
+				  static_cast<int>(ChordAccidentals::Sharps));
+	obs_property_list_add_int(accidentals, obs_module_text("Chord.Accidentals.Flats"),
+				  static_cast<int>(ChordAccidentals::Flats));
+	obs_properties_add_bool(recognition, "chord_symbols", obs_module_text("Chord.Symbols"));
 	obs_properties_add_int_slider(recognition, "settle_ms", obs_module_text("Chord.Settle"), 0, 500, 10);
 	obs_properties_add_int_slider(recognition, "clear_ms", obs_module_text("Chord.Clear"), 0, 2000, 10);
 	obs_properties_add_text(recognition, "recognition_help", obs_module_text("Chord.Help"), OBS_TEXT_INFO);
@@ -325,7 +363,7 @@ void chord_source_tick(void *data, float)
 		obs_source_update_properties(cs->source);
 	}
 	if (cs->preview) {
-		update_text(cs, "Cmaj7/E");
+		update_text(cs, cs->preview_label());
 		update_raster_density(cs);
 		return;
 	}
@@ -336,7 +374,7 @@ void chord_source_tick(void *data, float)
 	}
 	const auto snapshot = cs->midi->snapshot(cs->channel, cs->include_sustain);
 	const auto &chord = cs->tracker.update(snapshot.notes, os_gettime_ns() / 1000000);
-	update_text(cs, chord ? format_chord(*chord, cs->show_bass, cs->prefer_flats) : "");
+	update_text(cs, chord ? cs->label(*chord) : "");
 	update_raster_density(cs);
 }
 
