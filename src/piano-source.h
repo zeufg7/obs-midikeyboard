@@ -1,4 +1,5 @@
 #pragma once
+#include "note-trails.h"
 #include "piano-layout.h"
 #include <obs-module.h>
 #include <memory>
@@ -21,8 +22,19 @@ struct PianoSourceData {
 	bool show_outline = true;
 	int outline_width = 1;
 
+	// Floating notes
+	bool trails_enabled = false;
+	int trails_height = 400;
+	int trails_speed = 200;
+	uint32_t trails_color = 0xFF58A4E0;
+	int trails_fade = 25;
+	bool trails_sustain = true;
+	NoteTrails trails;
+	double clock = 0.0;
+
 	PianoRange last_range{-1, 0};
 	PianoLayout layout;
 
 	void calculate_layout();
+	float keyboard_offset() const { return trails_enabled ? static_cast<float>(trails_height) : 0.0f; }
 };

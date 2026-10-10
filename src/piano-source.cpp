@@ -3,6 +3,8 @@
 #include <graphics/graphics.h>
 #include <graphics/matrix4.h>
 #include <algorithm>
+#include <array>
+#include <cmath>
 
 void PianoSourceData::calculate_layout()
 {
@@ -46,6 +48,17 @@ static void piano_source_update(void *data, obs_data_t *settings)
 	ps->outline_width = normalize_piano_outline_width(obs_data_get_int(settings, "outline_width"));
 	obs_data_set_int(settings, "outline_width", ps->outline_width);
 
+	const bool was_enabled = ps->trails_enabled;
+	ps->trails_enabled = obs_data_get_bool(settings, "floating_notes");
+	ps->trails_height =
+		static_cast<int>(std::clamp<long long>(obs_data_get_int(settings, "notes_height"), 50, 2000));
+	ps->trails_speed = static_cast<int>(std::clamp<long long>(obs_data_get_int(settings, "notes_speed"), 20, 1500));
+	ps->trails_color = static_cast<uint32_t>(obs_data_get_int(settings, "notes_color"));
+	ps->trails_fade = static_cast<int>(std::clamp<long long>(obs_data_get_int(settings, "notes_fade"), 0, 100));
+	ps->trails_sustain = obs_data_get_bool(settings, "notes_sustain");
+	if (!ps->trails_enabled || !was_enabled)
+		ps->trails.clear();
+
 	const char *device = obs_data_get_string(settings, "midi_device");
 
 	std::string new_device = device ? device : "";
@@ -80,6 +93,12 @@ static void piano_source_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "show_outline", true);
 	obs_data_set_default_int(settings, "outline_width", 1);
 	obs_data_set_default_string(settings, "midi_device", "");
+	obs_data_set_default_bool(settings, "floating_notes", false);
+	obs_data_set_default_int(settings, "notes_height", 400);
+	obs_data_set_default_int(settings, "notes_speed", 200);
+	obs_data_set_default_int(settings, "notes_color", 0xFF58A4E0);
+	obs_data_set_default_int(settings, "notes_fade", 25);
+	obs_data_set_default_bool(settings, "notes_sustain", true);
 }
 
 static void populate_devices(obs_property_t *list, const std::string &selected)
@@ -150,7 +169,118 @@ static obs_properties_t *piano_source_properties(void *data)
 
 	obs_properties_add_bool(props, "velocity_sensitive", obs_module_text("VelocitySensitive"));
 
+	auto *notes_group = obs_properties_create();
+	obs_properties_add_int_slider(notes_group, "notes_height", obs_module_text("Notes.Height"), 50, 2000, 10);
+	obs_properties_add_int_slider(notes_group, "notes_speed", obs_module_text("Notes.Speed"), 20, 1500, 10);
+	obs_properties_add_color(notes_group, "notes_color", obs_module_text("Notes.Color"));
+	obs_properties_add_int_slider(notes_group, "notes_fade", obs_module_text("Notes.Fade"), 0, 100, 1);
+	obs_properties_add_bool(notes_group, "notes_sustain", obs_module_text("Notes.Sustain"));
+	obs_properties_add_group(props, "floating_notes", obs_module_text("Notes.Group"), OBS_GROUP_CHECKABLE,
+				 notes_group);
+
 	return props;
+}
+
+static void piano_source_tick(void *data, float seconds)
+{
+	auto *ps = static_cast<PianoSourceData *>(data);
+	if (!ps)
+		return;
+	ps->clock += static_cast<double>(seconds);
+	if (!ps->trails_enabled)
+		return;
+	const double max_age = static_cast<double>(ps->trails_height) / std::max(ps->trails_speed, 1) + 0.5;
+	if (ps->midi_input)
+		ps->trails.update(ps->midi_input->snapshot(-1, ps->trails_sustain).notes, ps->clock, max_age);
+	else
+		ps->trails.update({}, ps->clock, max_age);
+}
+
+static void draw_rect(gs_eparam_t *color_param, const vec4 &color, float x, float y, float w, float h)
+{
+	if (w <= 0.0f || h <= 0.0f || color.w <= 0.0f)
+		return;
+	gs_effect_set_vec4(color_param, &color);
+	gs_matrix_push();
+	gs_matrix_translate3f(x, y, 0.0f);
+	gs_matrix_scale3f(w, h, 1.0f);
+	gs_draw_sprite(nullptr, 0, 1, 1);
+	gs_matrix_pop();
+}
+
+static void draw_trails(PianoSourceData *ps, gs_eparam_t *color_param)
+{
+	const auto &trails = ps->trails.trails();
+	if (trails.empty())
+		return;
+
+	// Map each MIDI note to its key rectangle.
+	std::array<const KeyRect *, 128> keys{};
+	std::array<bool, 128> black{};
+	for (const auto &k : ps->layout.white_keys)
+		if (k.midi_note >= 0 && k.midi_note < 128)
+			keys[k.midi_note] = &k;
+	for (const auto &k : ps->layout.black_keys)
+		if (k.midi_note >= 0 && k.midi_note < 128) {
+			keys[k.midi_note] = &k;
+			black[k.midi_note] = true;
+		}
+
+	const float area = static_cast<float>(ps->trails_height);
+	const float speed = static_cast<float>(ps->trails_speed);
+	const float fade_zone = area * static_cast<float>(ps->trails_fade) / 100.0f;
+	constexpr int fade_steps = 12;
+
+	vec4 base;
+	vec4_from_rgba(&base, ps->trails_color);
+
+	for (const auto &t : trails) {
+		const KeyRect *key = keys[t.note];
+		if (!key)
+			continue;
+
+		float top = area - static_cast<float>(ps->clock - t.start) * speed;
+		float bottom = t.open ? area : area - static_cast<float>(ps->clock - t.end) * speed;
+		if (bottom <= 0.0f)
+			continue;
+		top = std::max(top, 0.0f);
+		if (bottom - top < 2.0f)
+			top = bottom - 2.0f;
+
+		const bool is_black = black[t.note];
+		const float gap = is_black ? 1.0f : 2.0f;
+		const float x = key->x + gap;
+		const float w = key->w - gap * 2.0f;
+
+		vec4 color = base;
+		if (is_black) {
+			color.x *= 0.78f;
+			color.y *= 0.78f;
+			color.z *= 0.78f;
+		}
+		if (ps->velocity_sensitive && t.velocity > 0)
+			color.w *= 0.35f + 0.65f * (t.velocity / 127.0f);
+
+		// Solid part below the fade zone.
+		const float solid_top = std::max(top, fade_zone);
+		if (bottom > solid_top)
+			draw_rect(color_param, color, x, solid_top, w, bottom - solid_top);
+
+		// Gradient part inside the fade zone, drawn in slices.
+		if (fade_zone > 0.0f && top < fade_zone) {
+			const float step = fade_zone / fade_steps;
+			const float seg_bottom = std::min(bottom, fade_zone);
+			for (int i = 0; i < fade_steps; ++i) {
+				const float s0 = std::max(top, i * step);
+				const float s1 = std::min(seg_bottom, (i + 1) * step);
+				if (s1 <= s0)
+					continue;
+				vec4 c = color;
+				c.w *= (i + 0.5f) / fade_steps;
+				draw_rect(color_param, c, x, s0, w, s1 - s0);
+			}
+		}
+	}
 }
 
 static void piano_source_render(void *data, gs_effect_t *)
@@ -175,6 +305,12 @@ static void piano_source_render(void *data, gs_effect_t *)
 
 	gs_technique_begin(tech);
 	gs_technique_begin_pass(tech, 0);
+
+	if (ps->trails_enabled)
+		draw_trails(ps, color_param);
+
+	gs_matrix_push();
+	gs_matrix_translate3f(0.0f, ps->keyboard_offset(), 0.0f);
 
 	// Draw white keys
 	for (const auto &key : ps->layout.white_keys) {
@@ -250,6 +386,8 @@ static void piano_source_render(void *data, gs_effect_t *)
 		gs_matrix_pop();
 	}
 
+	gs_matrix_pop();
+
 	gs_technique_end_pass(tech);
 	gs_technique_end(tech);
 }
@@ -267,7 +405,7 @@ static uint32_t piano_source_height(void *data)
 	auto *ps = static_cast<PianoSourceData *>(data);
 	if (!ps)
 		return 1;
-	return std::max(ps->layout.height, 1u);
+	return std::max(ps->layout.height + static_cast<uint32_t>(ps->keyboard_offset()), 1u);
 }
 
 struct obs_source_info piano_keyboard_source_info = {
@@ -282,5 +420,6 @@ struct obs_source_info piano_keyboard_source_info = {
 	.get_defaults = piano_source_defaults,
 	.get_properties = piano_source_properties,
 	.update = piano_source_update,
+	.video_tick = piano_source_tick,
 	.video_render = piano_source_render,
 };

@@ -29,6 +29,7 @@ target_sources(
     src/midi-device.cpp
     src/chord-detector.cpp
     src/chord-source.cpp
+    src/note-trails.cpp
     extern/rtmidi/RtMidi.cpp
 )
 
